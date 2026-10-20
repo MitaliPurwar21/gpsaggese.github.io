@@ -141,3 +141,5 @@ Jenkinsfile
 *.whl
 *.tar.gz
 *.zip
+.env
+data/
