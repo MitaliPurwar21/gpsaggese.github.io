@@ -1156,3 +1156,91 @@ assert abs(example_tone - 0.15) < 1e-10
 print(f"Example statement tone: {example_tone:+.2f}")
 
 # %%
+
+# %% [markdown]
+# ## Tracing the Models with Weave
+#
+# In this section I turn the three tone classifiers into `weave.Model`
+# classes:
+#
+# - the TF-IDF + logistic regression baseline from the previous section
+# - `FOMC-RoBERTa`, a RoBERTa-large model that the Trillion Dollar Words
+#   authors fine-tuned on FOMC sentences
+# - a zero-shot classifier (`facebook/bart-large-mnli`) that never sees our
+#   labeled data
+#
+# The model code lives in `weave_utils.py`. Each model's `predict` method is
+# decorated with `@weave.op`, so after `weave.init` runs, every prediction is
+# logged as a trace with its input sentence, output label, confidence, and
+# latency.
+#
+# `FOMC-RoBERTa` is gated on Hugging Face. To run it, I requested access on
+# the model page and saved my access token in `.env` as `HF_TOKEN`.
+
+# %%
+import weave_utils as wutils
+
+# Every @weave.op call after this line is recorded in my W&B project.
+weave_client = wutils.init_weave("msml610-weave-fomc")
+
+# %% [markdown]
+# ### Baseline as a `weave.Model`
+#
+# I refit the same TF-IDF + logistic regression setup as above, this time
+# inside a Weave model. The hyperparameters are attributes of the model, so
+# Weave keeps a separate version for every configuration I try.
+
+# %%
+baseline_weave = wutils.TfidfLogRegModel().fit(
+    train_data["sentence"],
+    train_data["label"],
+)
+
+# One traced prediction, as a quick check before running the others.
+baseline_weave.predict(test_data["sentence"].iloc[0])
+
+# %% [markdown]
+# ### FOMC-RoBERTa and the zero-shot model
+#
+# Both models are downloaded from Hugging Face the first time they predict,
+# and cached in `data/hf_cache` after that. The first call is slow because it
+# includes the download and loading the weights.
+
+# %%
+roberta_model = wutils.FomcRobertaModel()
+zero_shot_model = wutils.ZeroShotModel()
+
+# %% [markdown]
+# ### Comparing the three models on the same sentences
+#
+# I take two test sentences from each class, so every label shows up, and
+# run all three models on them. Each prediction becomes its own trace in
+# Weave.
+
+# %%
+sample_df = test_data.groupby("label").sample(n=2, random_state=42)
+
+tone_models = {
+    "baseline": baseline_weave,
+    "fomc_roberta": roberta_model,
+    "zero_shot": zero_shot_model,
+}
+
+comparison_df = wutils.predict_sample(tone_models, sample_df)
+display(comparison_df)
+
+# %% [markdown]
+# ### Inspecting the traces
+#
+# `weave.init` prints a link to the project. On the **Traces** page, each row
+# is one `predict` call. Clicking a row shows:
+#
+# - the input sentence and the model object, with its attributes (for the
+#   baseline, the TF-IDF and logistic regression settings)
+# - the output: label, label name, and confidence
+# - the latency of the call
+#
+# Filtering by op name separates the three models. The first `fomc_roberta`
+# and `zero_shot` calls are much slower than the rest, because they include
+# loading the model. This sample is only a sanity check. The full comparison
+# on all 496 test sentences comes in the next section with `weave.Evaluation`.
