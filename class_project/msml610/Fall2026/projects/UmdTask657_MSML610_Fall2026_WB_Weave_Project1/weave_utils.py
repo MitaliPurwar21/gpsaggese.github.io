@@ -4,11 +4,11 @@ weave_utils.py
 Utilities for the Weave FOMC tone project. The notebooks call these functions
 and classes so the notebook cells stay short and readable.
 
-- `init_weave()` loads my API keys from `.env` and starts a Weave project
+- `init_weave()` loads the API keys from `.env` and starts a Weave project
 - `TfidfLogRegModel`, `FomcRobertaModel`, and `ZeroShotModel` are the three
   hawkish/dovish/neutral classifiers, each written as a `weave.Model`
-- `predict_sample()` runs several models on the same sentences so I can compare
-  them side by side
+- `predict_sample()` runs several models on the same sentences for a
+  side-by-side comparison
 - `make_test_dataset()`, `accuracy_scorer`, `MacroF1Scorer`, and
   `run_evaluations()` evaluate every model on the test set with
   `weave.Evaluation`
@@ -39,15 +39,14 @@ _LOG = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
-# My API keys (WANDB_API_KEY and HF_TOKEN) live in this git-ignored file.
+# Load the API keys (WANDB_API_KEY and HF_TOKEN) from the git-ignored file.
 dotenv.load_dotenv(PROJECT_DIR / ".env")
 
-# Hugging Face models are large, so I cache them under the git-ignored data/
-# folder. That way they survive container restarts and I only download them
-# once.
+# Cache the Hugging Face models under the git-ignored data/ folder, so they
+# survive container restarts and download only once.
 os.environ.setdefault("HF_HOME", str(PROJECT_DIR / "data" / "hf_cache"))
 
-# This is the label encoding used by the Trillion Dollar Words dataset.
+# Use the label encoding of the Trillion Dollar Words dataset.
 LABEL_NAMES: Dict[int, str] = {0: "dovish", 1: "hawkish", 2: "neutral"}
 LABEL_IDS: Dict[str, int] = {name: idx for idx, name in LABEL_NAMES.items()}
 
@@ -74,15 +73,13 @@ def init_weave(project_name: str = "msml610-weave-fomc") -> Any:
             "WANDB_API_KEY is missing. Add it to the .env file in the project "
             "folder (see https://wandb.ai/authorize)."
         )
-    # By default Weave prints a link after every traced call, which floods the
-    # notebook when a model predicts hundreds of sentences. I turn that off and
-    # browse the calls on the Traces page instead. I use the environment
-    # variable because passing `settings=` to `weave.init` did not stop the
-    # links: they are printed from a background thread that doesn't see it.
+    # Turn off the link Weave prints after every traced call, since it floods
+    # the notebook when a model predicts hundreds of sentences. Use the
+    # environment variable, since passing `settings=` to `weave.init` does not
+    # stop the links: a background thread prints them and never sees it.
     os.environ.setdefault("WEAVE_PRINT_CALL_LINK", "false")
-    # The notebook logs at INFO level, which makes the HTTP clients print one
-    # line per request: `httpx` for Weave's calls to W&B and `httpx2` for the
-    # Hugging Face downloads. I only want to see their warnings.
+    # Show only warnings from the HTTP clients, since at INFO level they print
+    # one line per request (`httpx` for W&B, `httpx2` for Hugging Face).
     for http_logger in ("httpx", "httpx2"):
         logging.getLogger(http_logger).setLevel(logging.WARNING)
     client = weave.init(project_name)
@@ -113,7 +110,7 @@ class TfidfLogRegModel(weave.Model):
     Baseline classifier: TF-IDF features followed by logistic regression.
 
     The hyperparameters are model attributes, so Weave stores a new version of
-    the model whenever I change one of them.
+    the model whenever one of them changes.
     """
 
     ngram_range: Tuple[int, int] = (1, 2)
@@ -121,8 +118,8 @@ class TfidfLogRegModel(weave.Model):
     C: float = 1.0
     max_iter: int = 1000
     random_state: int = 42
-    # The fitted sklearn pipeline is private because Weave doesn't need to
-    # serialize it, only the settings above.
+    # Keep the fitted sklearn pipeline private, since Weave only needs to
+    # serialize the settings above.
     _pipeline: Optional[Pipeline] = pydantic.PrivateAttr(default=None)
 
     def fit(self, sentences: List[str], labels: List[int]) -> "TfidfLogRegModel":
@@ -131,7 +128,7 @@ class TfidfLogRegModel(weave.Model):
 
         :param sentences: training sentences
         :param labels: integer labels (0 dovish, 1 hawkish, 2 neutral)
-        :return: the fitted model, so I can chain calls
+        :return: the fitted model, to allow chaining calls
         """
         self._pipeline = Pipeline(
             [
@@ -200,15 +197,14 @@ class FomcRobertaModel(weave.Model):
     model_name: str = "gtfintechlab/FOMC-RoBERTa"
     max_length: int = 256
     _pipe: Any = pydantic.PrivateAttr(default=None)
-    # Weave evaluates dataset rows in parallel threads, and Hugging Face fast
-    # tokenizers fail with "Already borrowed" when two threads use them at the
-    # same time. The lock makes the threads take turns.
+    # Serialize calls with a lock, since Weave evaluates rows in parallel
+    # threads and Hugging Face fast tokenizers fail with "Already borrowed" when
+    # two threads use them at the same time.
     _lock: threading.Lock = pydantic.PrivateAttr(default_factory=threading.Lock)
 
     def _load(self) -> Any:
-        # I load the model on the first prediction, not when the object is
-        # created, so building the object is instant and the download only
-        # happens once.
+        # Load the model on the first prediction instead of at construction,
+        # so creating the object is instant and the download happens once.
         if self._pipe is None:
             import transformers
 
@@ -245,12 +241,12 @@ class ZeroShotModel(weave.Model):
     Zero-shot classifier built on a natural language inference model.
 
     It never sees our training data. For each sentence, it scores how well
-    each label description fits, and I take the best one.
+    each label description fits, and the best one wins.
     """
 
     model_name: str = "facebook/bart-large-mnli"
-    # I describe each label in plain words because the NLI model does better
-    # with a short explanation than with the bare word "hawkish".
+    # Describe each label in plain words, since the NLI model handles a short
+    # explanation better than the bare word "hawkish".
     label_descriptions: Dict[str, str] = {
         "dovish": "dovish, favoring lower interest rates or easier monetary policy",
         "hawkish": "hawkish, favoring higher interest rates or tighter monetary policy",
@@ -258,9 +254,9 @@ class ZeroShotModel(weave.Model):
     }
     hypothesis_template: str = "The monetary policy stance of this sentence is {}."
     _pipe: Any = pydantic.PrivateAttr(default=None)
-    # Weave evaluates dataset rows in parallel threads, and Hugging Face fast
-    # tokenizers fail with "Already borrowed" when two threads use them at the
-    # same time. The lock makes the threads take turns.
+    # Serialize calls with a lock, since Weave evaluates rows in parallel
+    # threads and Hugging Face fast tokenizers fail with "Already borrowed" when
+    # two threads use them at the same time.
     _lock: threading.Lock = pydantic.PrivateAttr(default_factory=threading.Lock)
 
     def _load(self) -> Any:
@@ -291,7 +287,7 @@ class ZeroShotModel(weave.Model):
                 candidate_labels=descriptions,
                 hypothesis_template=self.hypothesis_template,
             )
-        # The pipeline sorts the labels by score, so the first one is the best.
+        # Take the first label, since the pipeline sorts the labels by score.
         best_description = output["labels"][0]
         best_name = next(
             name
@@ -387,8 +383,8 @@ class MacroF1Scorer(weave.Scorer):
     once all the rows are in.
     """
 
-    # I pass the labels explicitly so a class the model never predicts still
-    # counts, with an F1 of 0, instead of silently dropping out of the average.
+    # Pass the labels explicitly, so a class the model never predicts still
+    # counts with an F1 of 0 instead of silently dropping out of the average.
     labels: List[int] = [0, 1, 2]
 
     @weave.op
@@ -414,7 +410,7 @@ class MacroF1Scorer(weave.Scorer):
 
 def make_evaluation(dataset: weave.Dataset) -> weave.Evaluation:
     """
-    Build the evaluation I run for every tone model.
+    Build the evaluation used for every tone model.
 
     :param dataset: the published test dataset
     :return: an evaluation with the accuracy and macro-F1 scorers
@@ -433,7 +429,7 @@ async def run_evaluations(
     """
     Evaluate each model and collect the headline numbers in one table.
 
-    Before each evaluation I make one warm-up prediction. If a model can't
+    Make one warm-up prediction before each evaluation. If a model can't
     load (for example, a gated Hugging Face repo without access), the error
     shows up here, instead of Weave recording a failed call for every row and
     still finishing the evaluation. The warm-up also keeps the one-time model
@@ -445,15 +441,14 @@ async def run_evaluations(
     """
     first_sentence = evaluation.dataset.rows[0]["sentence"]
     n_rows = len(evaluation.dataset.rows)
-    # Weave normally scores 20 rows at a time in parallel threads. The
-    # transformer models can only work on one sentence at a time (see the lock
-    # in their classes), so the other threads just wait, and Weave counts that
-    # waiting as model latency. In my first test, that made the zero-shot model
-    # look ten times slower than it is. One row at a time gives honest
-    # latencies and is no slower overall.
+    # Score one row at a time. With the default of 20 parallel threads, the
+    # other threads wait on the lock of the transformer models, and Weave counts
+    # that wait as model latency (it made the zero-shot model look ten times
+    # slower). One row at a time gives honest latencies at the same total
+    # speed.
     os.environ["WEAVE_PARALLELISM"] = "1"
-    # Weave logs a progress line for every row, about 1,500 lines for three
-    # models. I keep only its warnings while the evaluations run, since this
+    # Keep only warnings from Weave while the evaluations run, since it logs a
+    # progress line per row (about 1,500 lines for three models) and this
     # function returns a summary table anyway.
     weave_logger = logging.getLogger("weave")
     previous_level = weave_logger.level
@@ -474,7 +469,7 @@ async def run_evaluations(
 
 def _summary_row(name: str, summary: Dict[str, Any], n_rows: int) -> Dict[str, Any]:
     """
-    Pick out the numbers I report from one `evaluate()` summary.
+    Pick out the reported numbers from one `evaluate()` summary.
     """
     f1_summary = summary["MacroF1Scorer"]
     if f1_summary["n_scored"] < n_rows:

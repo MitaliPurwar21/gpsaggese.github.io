@@ -1180,7 +1180,7 @@ print(f"Example statement tone: {example_tone:+.2f}")
 # %%
 import weave_utils as wutils
 
-# Every @weave.op call after this line is recorded in my W&B project.
+# Start tracing: record every @weave.op call after this line in the W&B project.
 weave_client = wutils.init_weave("msml610-weave-fomc")
 
 # %% [markdown]
@@ -1196,7 +1196,7 @@ baseline_weave = wutils.TfidfLogRegModel().fit(
     train_data["label"],
 )
 
-# One traced prediction, as a quick check before running the others.
+# Run one traced prediction as a quick check before the other models.
 baseline_weave.predict(test_data["sentence"].iloc[0])
 
 # %% [markdown]

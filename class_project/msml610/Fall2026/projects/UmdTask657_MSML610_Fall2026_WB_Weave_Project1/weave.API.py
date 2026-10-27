@@ -86,15 +86,14 @@ except ImportError:
 dotenv.load_dotenv(Path.cwd() / ".env")
 assert os.environ.get("WANDB_API_KEY"), "Add WANDB_API_KEY to the .env file."
 
-# Weave prints a link after every traced call by default. This notebook makes
-# dozens of calls, so I turn the links off and use the Weave UI instead.
+# Turn off the link Weave prints after every traced call, since this notebook
+# makes dozens of calls and the Weave UI is easier to browse.
 os.environ["WEAVE_PRINT_CALL_LINK"] = "false"
-# The notebook logs at INFO level, which would also print every HTTP request
-# to W&B (Weave uses both the `httpx` and `httpx2` clients).
+# Hide the HTTP requests to W&B that INFO-level logging would print (Weave
+# uses both the `httpx` and `httpx2` clients).
 for http_logger in ("httpx", "httpx2"):
     logging.getLogger(http_logger).setLevel(logging.WARNING)
-# Weave prints its own messages, and the notebook logger would print each one
-# a second time.
+# Stop the notebook logger from printing every Weave message a second time.
 logging.getLogger("weave").propagate = False
 
 # %% [markdown]
@@ -163,9 +162,8 @@ def keyword_tone(sentence: str) -> Dict[str, Any]:
 
 
 # %%
-# Calling an op works like calling any Python function. The difference is
-# that this call, and the two `count_keyword_hits` calls inside it, now show up
-# on the Traces page of the project.
+# Call the op like any Python function. This call and the two
+# `count_keyword_hits` calls inside it now appear on the Traces page.
 keyword_tone("The Committee decided to raise the target range to curb inflation.")
 
 # %% [markdown]
@@ -201,8 +199,8 @@ toy_dataset_ref = weave.publish(toy_dataset)
 print("Dataset reference:", toy_dataset_ref.uri())
 
 # %%
-# The reference can load the dataset back, which is how a teammate (or a later
-# session) would get exactly the same rows.
+# Load the dataset back through its reference, the way a teammate or a later
+# session gets exactly the same rows.
 loaded_dataset = toy_dataset_ref.get()
 display(pd.DataFrame(list(loaded_dataset.rows)))
 
@@ -249,32 +247,31 @@ class KeywordToneModel(weave.Model):
 
 
 # %%
-# Version 1 uses the same keyword lists as the plain function above.
+# Use the keyword lists of the plain function above for version 1.
 model_v1 = KeywordToneModel(
     name="keyword-tone",
     hawkish_words=HAWKISH_WORDS,
     dovish_words=DOVISH_WORDS,
 )
 
-# Version 2 fixes the two problems I see in version 1. "inflation" shows up in
-# hawkish and dovish sentences alike, so it is a poor signal and I drop it.
-# The lists are also too short, so I add more words for each side.
+# Fix the two problems of version 1 in version 2: drop "inflation", which
+# appears in hawkish and dovish sentences alike, and add more words to each
+# list.
 model_v2 = KeywordToneModel(
     name="keyword-tone",
     hawkish_words=["raise", "increase", "tight", "elevated"],
     dovish_words=["lower", "cut", "support", "weak", "ease", "accommodative"],
 )
 
-# Publishing both under the same name gives two versions of one model.
+# Publish both under the same name to get two versions of one model.
 model_v1_ref = weave.publish(model_v1)
 model_v2_ref = weave.publish(model_v2)
 print("Version 1:", model_v1_ref.uri())
 print("Version 2:", model_v2_ref.uri())
 
 # %%
-# The same dovish sentence gets a different label from the two versions:
-# version 1 is misled by "inflation", while version 2 picks up "weakened" and
-# "eased".
+# Compare the two versions on one dovish sentence: version 1 is misled by
+# "inflation", while version 2 picks up "weakened" and "eased".
 example_sentence = "Economic activity has weakened and inflation pressures have eased."
 print("Version 1:", model_v1.predict(example_sentence))
 print("Version 2:", model_v2.predict(example_sentence))
@@ -349,9 +346,9 @@ toy_evaluation = weave.Evaluation(
 )
 
 # %%
-# `evaluate()` is async, so it runs with `await` in the notebook. The
-# `display_name` names each run, so the two versions are easy to tell apart
-# on the Evals page.
+# Run each evaluation with `await`, since `evaluate()` is async. Name each run
+# with `display_name` so the two versions are easy to tell apart on the Evals
+# page.
 summary_v1 = await toy_evaluation.evaluate(
     model_v1, __weave={"display_name": "keyword-tone-v1"}
 )
@@ -360,8 +357,7 @@ summary_v2 = await toy_evaluation.evaluate(
 )
 
 # %%
-# The summaries are nested dictionaries. I flatten the parts I care about into
-# one table to compare the two versions.
+# Flatten the nested summaries into one table to compare the two versions.
 comparison = pd.DataFrame(
     {
         version: {
