@@ -1244,3 +1244,54 @@ display(comparison_df)
 # and `zero_shot` calls are much slower than the rest, because they include
 # loading the model. This sample is only a sanity check. The full comparison
 # on all 496 test sentences comes in the next section with `weave.Evaluation`.
+
+# %% [markdown]
+# ## Evaluating the Models with Weave
+#
+# Spot checks on a few sentences are not enough to compare the models, so
+# here I evaluate all three on the full test set (496 sentences) with
+# `weave.Evaluation`:
+#
+# - **Dataset**: I publish the test sentences as a `weave.Dataset`, so every
+#   evaluation points to the same versioned copy of the data
+# - **Accuracy scorer**: an `@weave.op` that checks whether each prediction
+#   matches the true label; Weave averages it into the accuracy
+# - **Macro-F1 scorer**: a custom `weave.Scorer`. F1 can't be computed one
+#   sentence at a time, so `score()` only records the true and predicted label
+#   for each row, and `summarize()` computes macro-F1 over all of them
+#
+# Macro-F1 is the main metric because it weighs the three classes equally.
+# About half of the test sentences are neutral, so a model that leans towards
+# "neutral" can have decent accuracy while being poor at what we care about:
+# telling hawkish from dovish.
+
+# %%
+test_dataset = wutils.make_test_dataset(test_data)
+tone_evaluation = wutils.make_evaluation(test_dataset)
+
+print("Sentences in the evaluation dataset:", len(test_dataset.rows))
+
+# %% [markdown]
+# ### Running the evaluations
+#
+# Each model gets one evaluation run, named after the model. The zero-shot
+# model is the slowest, at roughly 1 second per sentence on CPU, so this cell
+# takes several minutes.
+
+# %%
+evaluation_results = await wutils.run_evaluations(tone_evaluation, tone_models)
+display(evaluation_results)
+
+# %% [markdown]
+# ### Comparing the evaluations in the Weave UI
+#
+# On the **Evals** page of the Weave project, I select the three runs and
+# click **Compare**. The comparison view shows:
+#
+# - the summary metrics side by side (accuracy, macro-F1, per-class F1,
+#   latency)
+# - every test sentence with each model's prediction, so I can filter to the
+#   sentences where the models disagree and read them
+#
+# This is where the per-class F1 scores are most useful: a low `f1_hawkish`
+# or `f1_dovish` shows which kind of sentence a model struggles with.

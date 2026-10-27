@@ -9,6 +9,9 @@ and classes so the notebook cells stay short and readable.
   hawkish/dovish/neutral classifiers, each written as a `weave.Model`
 - `predict_sample()` runs several models on the same sentences so I can compare
   them side by side
+- `make_test_dataset()`, `accuracy_scorer`, `MacroF1Scorer`, and
+  `run_evaluations()` evaluate every model on the test set with
+  `weave.Evaluation`
 
 Import as:
 
@@ -17,6 +20,7 @@ import weave_utils as wutils
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +30,7 @@ import pydantic
 import weave
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score
 from sklearn.pipeline import Pipeline
 
 import helpers.hnotebook as hnotebo
@@ -195,6 +200,10 @@ class FomcRobertaModel(weave.Model):
     model_name: str = "gtfintechlab/FOMC-RoBERTa"
     max_length: int = 256
     _pipe: Any = pydantic.PrivateAttr(default=None)
+    # Weave evaluates dataset rows in parallel threads, and Hugging Face fast
+    # tokenizers fail with "Already borrowed" when two threads use them at the
+    # same time. The lock makes the threads take turns.
+    _lock: threading.Lock = pydantic.PrivateAttr(default_factory=threading.Lock)
 
     def _load(self) -> Any:
         # I load the model on the first prediction, not when the object is
@@ -220,8 +229,9 @@ class FomcRobertaModel(weave.Model):
         :param sentence: FOMC sentence to classify
         :return: dict with `label`, `label_name`, and `confidence`
         """
-        pipe = self._load()
-        output = pipe(sentence, truncation=True, max_length=self.max_length)[0]
+        with self._lock:
+            pipe = self._load()
+            output = pipe(sentence, truncation=True, max_length=self.max_length)[0]
         return _format_prediction(_label_id_from_hf(output["label"]), output["score"])
 
 
@@ -248,6 +258,10 @@ class ZeroShotModel(weave.Model):
     }
     hypothesis_template: str = "The monetary policy stance of this sentence is {}."
     _pipe: Any = pydantic.PrivateAttr(default=None)
+    # Weave evaluates dataset rows in parallel threads, and Hugging Face fast
+    # tokenizers fail with "Already borrowed" when two threads use them at the
+    # same time. The lock makes the threads take turns.
+    _lock: threading.Lock = pydantic.PrivateAttr(default_factory=threading.Lock)
 
     def _load(self) -> Any:
         if self._pipe is None:
@@ -269,13 +283,14 @@ class ZeroShotModel(weave.Model):
         :param sentence: FOMC sentence to classify
         :return: dict with `label`, `label_name`, and `confidence`
         """
-        pipe = self._load()
         descriptions = list(self.label_descriptions.values())
-        output = pipe(
-            sentence,
-            candidate_labels=descriptions,
-            hypothesis_template=self.hypothesis_template,
-        )
+        with self._lock:
+            pipe = self._load()
+            output = pipe(
+                sentence,
+                candidate_labels=descriptions,
+                hypothesis_template=self.hypothesis_template,
+            )
         # The pipeline sorts the labels by score, so the first one is the best.
         best_description = output["labels"][0]
         best_name = next(
@@ -321,3 +336,160 @@ def predict_sample(
             result[name] = prediction["label_name"]
         rows.append(result)
     return pd.DataFrame(rows)
+
+
+# #############################################################################
+# Evaluation with weave.Evaluation
+# #############################################################################
+
+
+def make_test_dataset(
+    test_df: pd.DataFrame,
+    *,
+    name: str = "fomc-test-sentences",
+) -> weave.Dataset:
+    """
+    Turn the labeled test split into a published `weave.Dataset`.
+
+    The column names have to match the argument names Weave passes around:
+    `sentence` goes to each model's `predict()`, and `label` goes to the
+    scorers.
+
+    :param test_df: test sentences with `sentence` and `label` columns
+    :param name: name of the dataset in Weave
+    :return: the published dataset
+    """
+    rows = [
+        {"sentence": str(row.sentence), "label": int(row.label)}
+        for row in test_df.itertuples(index=False)
+    ]
+    dataset = weave.Dataset(name=name, rows=rows)
+    weave.publish(dataset)
+    return dataset
+
+
+@weave.op
+def accuracy_scorer(label: int, output: Dict[str, Any]) -> Dict[str, bool]:
+    """
+    Check whether the predicted label matches the true label for one sentence.
+
+    Weave averages `correct` over all rows, which gives the accuracy.
+    """
+    return {"correct": int(output["label"]) == int(label)}
+
+
+class MacroF1Scorer(weave.Scorer):
+    """
+    Macro-F1 over the whole test set.
+
+    F1 can't be computed one sentence at a time, so `score()` only records the
+    true and predicted label for each row, and `summarize()` computes macro-F1
+    once all the rows are in.
+    """
+
+    # I pass the labels explicitly so a class the model never predicts still
+    # counts, with an F1 of 0, instead of silently dropping out of the average.
+    labels: List[int] = [0, 1, 2]
+
+    @weave.op
+    def score(self, *, output: Dict[str, Any], label: int) -> Dict[str, int]:
+        return {"true_label": int(label), "predicted_label": int(output["label"])}
+
+    @weave.op
+    def summarize(self, score_rows: List[Optional[Dict[str, int]]]) -> Dict[str, Any]:
+        rows = [row for row in score_rows if row]
+        y_true = [row["true_label"] for row in rows]
+        y_pred = [row["predicted_label"] for row in rows]
+        per_class = f1_score(
+            y_true, y_pred, labels=self.labels, average=None, zero_division=0
+        )
+        summary = {
+            "macro_f1": float(per_class.mean()),
+            "n_scored": len(rows),
+        }
+        for label_id, value in zip(self.labels, per_class):
+            summary[f"f1_{LABEL_NAMES[label_id]}"] = float(value)
+        return summary
+
+
+def make_evaluation(dataset: weave.Dataset) -> weave.Evaluation:
+    """
+    Build the evaluation I run for every tone model.
+
+    :param dataset: the published test dataset
+    :return: an evaluation with the accuracy and macro-F1 scorers
+    """
+    return weave.Evaluation(
+        name="fomc-tone-evaluation",
+        dataset=dataset,
+        scorers=[accuracy_scorer, MacroF1Scorer()],
+    )
+
+
+async def run_evaluations(
+    evaluation: weave.Evaluation,
+    models: Dict[str, weave.Model],
+) -> pd.DataFrame:
+    """
+    Evaluate each model and collect the headline numbers in one table.
+
+    Before each evaluation I make one warm-up prediction. If a model can't
+    load (for example, a gated Hugging Face repo without access), the error
+    shows up here, instead of Weave recording a failed call for every row and
+    still finishing the evaluation. The warm-up also keeps the one-time model
+    loading out of the latency numbers.
+
+    :param evaluation: evaluation from `make_evaluation()`
+    :param models: display name -> model
+    :return: one row per model with macro-F1, accuracy, and latency
+    """
+    first_sentence = evaluation.dataset.rows[0]["sentence"]
+    n_rows = len(evaluation.dataset.rows)
+    # Weave normally scores 20 rows at a time in parallel threads. The
+    # transformer models can only work on one sentence at a time (see the lock
+    # in their classes), so the other threads just wait, and Weave counts that
+    # waiting as model latency. In my first test, that made the zero-shot model
+    # look ten times slower than it is. One row at a time gives honest
+    # latencies and is no slower overall.
+    os.environ["WEAVE_PARALLELISM"] = "1"
+    # Weave logs a progress line for every row, about 1,500 lines for three
+    # models. I keep only its warnings while the evaluations run, since this
+    # function returns a summary table anyway.
+    weave_logger = logging.getLogger("weave")
+    previous_level = weave_logger.level
+    weave_logger.setLevel(logging.WARNING)
+    results = []
+    try:
+        for name, model in models.items():
+            _LOG.info("Evaluating %s on %d sentences", name, n_rows)
+            model.predict(first_sentence)
+            summary = await evaluation.evaluate(
+                model, __weave={"display_name": name}
+            )
+            results.append(_summary_row(name, summary, n_rows))
+    finally:
+        weave_logger.setLevel(previous_level)
+    return pd.DataFrame(results).set_index("model").round(4)
+
+
+def _summary_row(name: str, summary: Dict[str, Any], n_rows: int) -> Dict[str, Any]:
+    """
+    Pick out the numbers I report from one `evaluate()` summary.
+    """
+    f1_summary = summary["MacroF1Scorer"]
+    if f1_summary["n_scored"] < n_rows:
+        _LOG.warning(
+            "%s: only %d of %d rows were scored; check the failed calls in Weave",
+            name,
+            f1_summary["n_scored"],
+            n_rows,
+        )
+    return {
+        "model": name,
+        "macro_f1": f1_summary["macro_f1"],
+        "accuracy": summary["accuracy_scorer"]["correct"]["true_fraction"],
+        "f1_dovish": f1_summary["f1_dovish"],
+        "f1_hawkish": f1_summary["f1_hawkish"],
+        "f1_neutral": f1_summary["f1_neutral"],
+        "mean_latency_s": summary["model_latency"]["mean"],
+    }
